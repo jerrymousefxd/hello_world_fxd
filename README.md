@@ -1,46 +1,98 @@
-# hello_world_fxd
-package com.filesupload;
+package nioserver;
 
-import java.io.File;
-import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Set;
 
-import javax.servlet.http.HttpServletRequest;
 
-import org.springframework.stereotype.Controller;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.multipart.MultipartFile;
+/**
+ * <p>Title: 主控服务线程,采用NIO实现的长连接服务器</p>
+ * @author sxl
+ * @version 1.0
+ */
 
-@Controller
-public class FilesUploadAction {
-	
-	@RequestMapping("/login.do")
-	/**
-	 * 测试登陆跳转
-	 * @return
-	 */
-	public String testLogin(){
-		System.out.println("ssss");
-		return "page/index";
-	}
-	@RequestMapping("/filesUpload.do")
-	public String filesUpload(MultipartFile file,HttpServletRequest request){
-		String path = request.getSession().getServletContext().getRealPath("files");
-		System.out.println("存放文件路径:"+path);
-		String fileName = file.getOriginalFilename();
-		File targetFile = new File(path, fileName);
-		if(!targetFile.exists()){  
-            targetFile.mkdirs();  
+public class Server implements Runnable {
+    private static Selector selector;
+    private ServerSocketChannel sschannel;
+    private InetSocketAddress address;
+    protected Notifier notifier;
+    private int port;
+
+    /**
+     * 创建主控服务线程
+     * @param port 服务端口
+     * @throws java.lang.Exception
+     */
+    public static int MAX_THREADS = 4;
+    public Server(int port) throws Exception {
+        this.port = port;
+
+        // 获取事件触发器
+        notifier = Notifier.getNotifier();
+
+        // 创建读写线程池
+        for (int i = 0; i < MAX_THREADS; i++) {
+            Thread r = new Reader();
+            Thread w = new Writer();
+            Thread sys = new Syslog();
+            r.start();
+            w.start();
+            sys.start();
         }
-		try {
-			file.transferTo(targetFile);
-		} catch (IllegalStateException | IOException e) {
-			e.printStackTrace();
-		}
-		
-		String returnPath = request.getContextPath()+"/upload/"+fileName;
-		request.setAttribute("filesUploadResult", returnPath);
-		System.out.println("返回上传结果:"+returnPath);
-		return "index/index";
-	}
-}
 
+        // 创建无阻塞网络套接
+        selector = Selector.open();
+        sschannel = ServerSocketChannel.open();
+        sschannel.configureBlocking(false);
+        address = new InetSocketAddress(port);
+        ServerSocket ss = sschannel.socket();
+        ss.bind(address);
+        sschannel.register(selector, SelectionKey.OP_ACCEPT);
+    }
+
+    public void run() {
+        System.out.println("Server started ...");
+        System.out.println("Server listening on port: " + port);
+        // 监听
+        while (true) {
+            try {
+                int num = 0;
+                num = selector.select();
+                if (num > 0) {
+                    Set selectedKeys = selector.selectedKeys();
+                    Iterator it = selectedKeys.iterator();
+                    while (it.hasNext()) {
+                        SelectionKey key = (SelectionKey) it.next();
+                        it.remove();
+                        // 处理IO事件
+                        if (key.isAcceptable()) {
+                           // Accept the new connection
+                           ServerSocketChannel ssc = (ServerSocketChannel) key.channel();
+                           notifier.fireOnAccept();
+                           SocketChannel sc = ssc.accept();
+                           sc.configureBlocking(false);
+                           // 触发接受连接事件
+                           Request request = new Request(sc);
+                           notifier.fireOnAccepted(request);
+                           // 注册读操作,以进行下一步的读操作
+                           sc.register(selector,  SelectionKey.OP_READ, request);
+                       }
+                       else if (key.isReadable()) {
+                           Reader.processRequest(key);  // 提交读服务线程读取客户端数据
+                       }
+                    }
+                }
+            }
+            catch (Exception e) {
+                continue;
+            }
+        }
+    }
+}
